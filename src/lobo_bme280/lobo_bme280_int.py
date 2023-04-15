@@ -64,6 +64,7 @@ MODE_NORMAL = const(3)
 
 BME280_TIMEOUT = const(100)  # about 1 second timeout
 
+
 class BME280:
 
     def __init__(self,
@@ -96,7 +97,6 @@ class BME280:
         # load calibration data
         dig_88_a1 = self.i2c.readfrom_mem(self.address, 0x88, 26)
         dig_e1_e7 = self.i2c.readfrom_mem(self.address, 0xE1, 7)
-
         self.dig_T1, self.dig_T2, self.dig_T3, self.dig_P1, \
             self.dig_P2, self.dig_P3, self.dig_P4, self.dig_P5, \
             self.dig_P6, self.dig_P7, self.dig_P8, self.dig_P9, \
@@ -108,6 +108,8 @@ class BME280:
         self.dig_H4 = (self.dig_H4 * 16) + (self.dig_H5 & 0xF)
         self.dig_H5 //= 16
 
+        self.t_fine = 0
+
         # temporary data holders which stay allocated
         self._l1_barray = bytearray(1)
         self._l8_barray = bytearray(8)
@@ -115,8 +117,7 @@ class BME280:
 
         self._l1_barray[0] = self._mode_temp << 5 | self._mode_press << 2 | MODE_SLEEP
         self.i2c.writeto_mem(self.address, BME280_REGISTER_CONTROL,
-                             self._l1_barray)
-        self.t_fine = 0
+                             bytearray([0x3c | MODE_SLEEP]))
 
     def read_raw_data(self, result):
         """ Reads the raw (uncompensated) data from the sensor.
@@ -173,35 +174,39 @@ class BME280:
         self.read_raw_data(self._l3_resultarray)
         raw_temp, raw_press, raw_hum = self._l3_resultarray
         # temperature
-        var1 = (raw_temp/16384.0 - self.dig_T1/1024.0) * self.dig_T2
-        var2 = raw_temp/131072.0 - self.dig_T1/8192.0
-        var2 = var2 * var2 * self.dig_T3
-        self.t_fine = int(var1 + var2)
-        temp = (var1 + var2) / 5120.0
-        temp = max(-40, min(85, temp))
+        var1 = (((raw_temp // 8) - (self.dig_T1 * 2)) * self.dig_T2) // 2048
+        var2 = (raw_temp // 16) - self.dig_T1
+        var2 = (((var2 * var2) // 4096) * self.dig_T3) // 16384
+        self.t_fine = var1 + var2
+        temp = (self.t_fine * 5 + 128) // 256
 
         # pressure
-        var1 = (self.t_fine/2.0) - 64000.0
-        var2 = var1 * var1 * self.dig_P6 / 32768.0 + var1 * self.dig_P5 * 2.0
-        var2 = (var2 / 4.0) + (self.dig_P4 * 65536.0)
-        var1 = (self.dig_P3 * var1 * var1 / 524288.0 + self.dig_P2 * var1) / 524288.0
-        var1 = (1.0 + var1 / 32768.0) * self.dig_P1
-        if (var1 == 0.0):
-            pressure = 30000  # avoid exception caused by division by zero
+        var1 = self.t_fine - 128000
+        var2 = var1 * var1 * self.dig_P6
+        var2 = var2 + ((var1 * self.dig_P5) << 17)
+        var2 = var2 + (self.dig_P4 << 35)
+        var1 = (((var1 * var1 * self.dig_P3) >> 8) +
+                ((var1 * self.dig_P2) << 12))
+        var1 = (((1 << 47) + var1) * self.dig_P1) >> 33
+        if var1 == 0:
+            pressure = 0
         else:
-            p = ((1048576.0 - raw_press) - (var2 / 4096.0)) * 6250.0 / var1
-            var1 = self.dig_P9 * p * p / 2147483648.0
-            var2 = p * self.dig_P8 / 32768.0
-            pressure = p + (var1 + var2 + self.dig_P7) / 16.0
-            pressure = max(30000, min(110000, pressure))
+            p = ((((1048576 - raw_press) << 31) - var2) * 3125) // var1
+            var1 = (self.dig_P9 * (p >> 13) * (p >> 13)) >> 25
+            var2 = (self.dig_P8 * p) >> 19
+            pressure = ((p + var1 + var2) >> 8) + (self.dig_P7 << 4)
 
         # humidity
-        h = (self.t_fine - 76800.0)
-        h = ((raw_hum - (self.dig_H4 * 64.0 + self.dig_H5 / 16384.0 * h)) *
-             (self.dig_H2 / 65536.0 * (1.0 + self.dig_H6 / 67108864.0 * h *
-                                       (1.0 + self.dig_H3 / 67108864.0 * h))))
-        humidity = h * (1.0 - self.dig_H1 * h / 524288.0)
-        # humidity = max(0, min(100, humidity))
+        h = self.t_fine - 76800
+        h = (((((raw_hum << 14) - (self.dig_H4 << 20) -
+                (self.dig_H5 * h)) + 16384) >> 15) *
+             (((((((h * self.dig_H6) >> 10) *
+                (((h * self.dig_H3) >> 11) + 32768)) >> 10) + 2097152) *
+              self.dig_H2 + 8192) >> 14))
+        h = h - (((((h >> 15) * (h >> 15)) >> 7) * self.dig_H1) >> 4)
+        h = 0 if h < 0 else h
+        h = 419430400 if h > 419430400 else h
+        humidity = h >> 12
 
         if result:
             result[0] = temp
@@ -209,7 +214,7 @@ class BME280:
             result[2] = humidity
             return result
 
-        return array("f", (temp, pressure, humidity))
+        return array("i", (temp, pressure, humidity))
 
     @property
     def sealevel(self):
@@ -217,7 +222,7 @@ class BME280:
 
     @sealevel.setter
     def sealevel(self, value):
-        if 30000 < value < 120000:  # just ensure some reasonable value
+        if 300 < value < 1200:  # just ensure some reasonable value
             self.__sealevel = value
 
     @property
@@ -227,7 +232,7 @@ class BME280:
         '''
         from math import pow
         try:
-            p = 44330 * (1.0 - pow(self.read_compensated_data()[1] /
+            p = 44330 * (1.0 - pow((self.read_compensated_data()[1] / 256) /
                                    self.__sealevel, 0.1903))
         except:
             p = 0.0
@@ -241,8 +246,10 @@ class BME280:
         """
         from math import log
         t, p, h = self.read_compensated_data()
+        t /= 100
+        h /= 1024
         h = (log(h, 10) - 2) / 0.4343 + (17.62 * t) / (243.12 + t)
-        return 243.12 * h / (17.62 - h)
+        return (243.12 * h / (17.62 - h)) * 100
 
     @property
     def values(self):
@@ -250,5 +257,8 @@ class BME280:
 
         t, p, h = self.read_compensated_data()
 
-        return ("{:.2f}C".format(t), "{:.2f}hPa".format(p/100),
-                "{:.2f}%".format(h))
+        p = p / 256
+
+        h = h / 1024
+        return ("{}C".format(t / 100), "{:.02f}hPa".format(p/100),
+                "{:.02f}%".format(h))

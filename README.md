@@ -11,6 +11,7 @@ $ pip install lobo_bme280
 ## License
 
 `lobo_bme280` was created by Lukasz Lobocki. It is licensed under the terms of the CC0 v1.0 Universal license.
+`lobo_bme280` was created using `https://github.com/robert-hh/BME280.git`
 
 ## Credits
 
