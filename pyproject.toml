@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "lobo_bme280"
-version = "0.2.1"
+version = "0.2.2"
 description = "Driver for bme280 sensor."
 authors = ["Lukasz Lobocki"]
 license = "CC0 v1.0 Universal"
